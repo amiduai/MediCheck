@@ -27,62 +27,71 @@ struct HistoryView: View {
     private let calendar = Calendar.current
     private let weekdays = ["日", "一", "二", "三", "四", "五", "六"]
 
-    private var recentRecords: [DailyRecord] { storage.recentRecords(days: 7) }
-    private var lastSevenCompleted: Int { recentRecords.reduce(0) { $0 + $1.completedCount } }
-    private var selectedRecord: DailyRecord { storage.recordSnapshot(for: selectedDay) }
+    private var selectedSummary: DailyMedicationSummary { storage.summary(for: selectedDay) }
     private var today: Date { calendar.startOfDay(for: .now) }
-    private var earliestMonth: Date {
-        let cutoff = calendar.date(byAdding: .day, value: -89, to: today) ?? today
-        return MonthCalendar.startOfMonth(containing: cutoff, calendar: calendar)
-    }
     private var currentMonth: Date { MonthCalendar.startOfMonth(containing: today, calendar: calendar) }
+    private var earliestMonth: Date {
+        let recordDates = storage.doseRecords.values.map(\.actionTime)
+        let planDates = storage.plans.map(\.startDate)
+        let earliest = (recordDates + planDates).min() ?? today
+        let cutoff = calendar.date(byAdding: .day, value: -729, to: today) ?? today
+        return MonthCalendar.startOfMonth(containing: max(earliest, cutoff), calendar: calendar)
+    }
+    private var lastSevenSummaries: [DailyMedicationSummary] {
+        (0..<7).compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+            return storage.summary(for: day)
+        }
+    }
+    private var recentCompleted: Int { lastSevenSummaries.reduce(0) { $0 + $1.completedCount } }
+    private var recentScheduled: Int { lastSevenSummaries.reduce(0) { $0 + $1.scheduledCount } }
+    private var recentAsNeeded: Int { lastSevenSummaries.reduce(0) { $0 + $1.asNeededRecords.count } }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                summary
+                summaryCard
                 calendarCard
                 selectedDayDetail
             }
             .padding(24)
         }
-        .frame(minWidth: 500, minHeight: 650)
-        .navigationTitle("服药记录")
+        .frame(minWidth: 540, minHeight: 650)
+        .navigationTitle("用药记录")
     }
 
-    private var summary: some View {
+    private var summaryCard: some View {
         SectionCard {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("最近 7 天")
-                        .font(.headline)
-                    Text("完成 \(lastSevenCompleted) / 21")
-                        .foregroundStyle(.secondary)
-                }
+            HStack(spacing: 28) {
+                metric(title: "最近 7 天", value: "\(recentCompleted) / \(recentScheduled)", detail: "计划已确认")
+                Divider().frame(height: 42)
+                metric(title: "按需记录", value: "\(recentAsNeeded)", detail: "次实际使用")
                 Spacer()
             }
+        }
+    }
+
+    private func metric(title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title3.bold())
+            Text(detail).font(.caption2).foregroundStyle(.secondary)
         }
     }
 
     private var calendarCard: some View {
         VStack(spacing: 14) {
             HStack {
-                Button { moveMonth(by: -1) } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .buttonStyle(.plain)
-                .disabled(displayedMonth <= earliestMonth)
-
+                Button { moveMonth(by: -1) } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.plain)
+                    .disabled(displayedMonth <= earliestMonth)
                 Spacer()
                 Text(displayedMonth.formatted(.dateTime.year().month(.wide)))
                     .font(.headline)
                 Spacer()
-
-                Button { moveMonth(by: 1) } label: {
-                    Image(systemName: "chevron.right")
-                }
-                .buttonStyle(.plain)
-                .disabled(displayedMonth >= currentMonth)
+                Button { moveMonth(by: 1) } label: { Image(systemName: "chevron.right") }
+                    .buttonStyle(.plain)
+                    .disabled(displayedMonth >= currentMonth)
             }
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 7) {
@@ -92,18 +101,13 @@ struct HistoryView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                 }
-
                 ForEach(Array(MonthCalendar.gridDays(for: displayedMonth).enumerated()), id: \.offset) { _, day in
-                    if let day {
-                        calendarDay(day)
-                    } else {
-                        Color.clear.frame(height: 52)
-                    }
+                    if let day { calendarDay(day) } else { Color.clear.frame(height: 52) }
                 }
             }
 
             HStack(spacing: 14) {
-                legend(color: .green, text: "3/3")
+                legend(color: .green, text: "全部确认")
                 legend(color: .orange, text: "部分确认")
                 legend(color: .secondary, text: "未确认")
                 Spacer()
@@ -116,7 +120,7 @@ struct HistoryView: View {
 
     private func calendarDay(_ day: Date) -> some View {
         let isFuture = day > today
-        let record = storage.recordSnapshot(for: day)
+        let summary = storage.summary(for: day)
         let isSelected = calendar.isDate(day, inSameDayAs: selectedDay)
         let isToday = calendar.isDateInToday(day)
 
@@ -127,10 +131,10 @@ struct HistoryView: View {
             VStack(spacing: 3) {
                 Text(day.formatted(.dateTime.day()))
                     .font(.system(size: 13, weight: isToday ? .bold : .regular))
-                if !isFuture {
-                    Text("\(record.completedCount)/3")
+                if !isFuture && (summary.scheduledCount > 0 || !summary.asNeededRecords.isEmpty) {
+                    Text(summary.scheduledCount > 0 ? "\(summary.completedCount)/\(summary.scheduledCount)" : "+\(summary.asNeededRecords.count)")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(completionColor(record.completedCount))
+                        .foregroundStyle(completionColor(summary))
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 46)
@@ -144,7 +148,7 @@ struct HistoryView: View {
         }
         .buttonStyle(.plain)
         .disabled(isFuture)
-        .accessibilityLabel("\(day.formatted(date: .long, time: .omitted))，完成 \(record.completedCount) / 3")
+        .accessibilityLabel("\(day.formatted(date: .long, time: .omitted))，完成 \(summary.completedCount) / \(summary.scheduledCount)")
     }
 
     private var selectedDayDetail: some View {
@@ -161,27 +165,34 @@ struct HistoryView: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 Spacer()
-                Text("\(selectedRecord.completedCount) / 3")
+                Text("\(selectedSummary.completedCount) / \(selectedSummary.scheduledCount)")
                     .fontWeight(.semibold)
             }
 
             Divider()
 
-            ForEach(DoseType.allCases) { dose in
-                HStack {
-                    Text(dose.displayName)
-                    Spacer()
-                    if let confirmed = selectedRecord.entries[dose]?.confirmedTime {
-                        Label(confirmed.formatted(date: .omitted, time: .shortened), systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    } else if calendar.isDateInToday(selectedDay),
-                              let entry = selectedRecord.entries[dose],
-                              entry.scheduledTime > .now {
-                        Text("\(entry.scheduledTime.formatted(date: .omitted, time: .shortened)) 待服")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Label("未确认", systemImage: "circle")
-                            .foregroundStyle(.secondary)
+            if selectedSummary.occurrences.isEmpty && selectedSummary.asNeededRecords.isEmpty {
+                Text("这一天没有用药计划或记录")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 16)
+            } else {
+                ForEach(selectedSummary.occurrences) { occurrence in
+                    MedicationOccurrenceRow(occurrence: occurrence, now: calendar.isDateInToday(selectedDay) ? .now : .distantFuture)
+                    if occurrence.id != selectedSummary.occurrences.last?.id { Divider() }
+                }
+                if !selectedSummary.asNeededRecords.isEmpty {
+                    if !selectedSummary.occurrences.isEmpty { Divider() }
+                    Text("按需记录")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(selectedSummary.asNeededRecords) { record in
+                        HStack {
+                            Label(storage.medication(id: record.medicationID)?.name ?? "已删除的药品", systemImage: "clock.badge.checkmark")
+                            Spacer()
+                            Text(record.actionTime.formatted(date: .omitted, time: .shortened))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -195,19 +206,17 @@ struct HistoryView: View {
         displayedMonth = month
         if offset < 0 {
             let range = calendar.range(of: .day, in: .month, for: month)
-            let lastDay = range?.count ?? 1
-            selectedDay = calendar.date(byAdding: .day, value: lastDay - 1, to: month) ?? month
+            selectedDay = calendar.date(byAdding: .day, value: (range?.count ?? 1) - 1, to: month) ?? month
         } else {
             selectedDay = calendar.isDate(month, equalTo: today, toGranularity: .month) ? today : month
         }
     }
 
-    private func completionColor(_ count: Int) -> Color {
-        switch count {
-        case 3: .green
-        case 1...2: .orange
-        default: .secondary
-        }
+    private func completionColor(_ summary: DailyMedicationSummary) -> Color {
+        if summary.scheduledCount == 0 { return .blue }
+        if summary.completedCount == summary.scheduledCount { return .green }
+        if summary.completedCount > 0 { return .orange }
+        return .secondary
     }
 
     private func legend(color: Color, text: String) -> some View {

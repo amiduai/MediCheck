@@ -7,13 +7,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("服药时间") {
-                ForEach(DoseType.allCases) { dose in
-                    DatePicker(dose.displayName, selection: timeBinding(for: dose), displayedComponents: .hourAndMinute)
-                }
-            }
-
-            Section("提醒设置") {
+            Section("提醒") {
                 Toggle("系统通知", isOn: settingBinding(\.notificationsEnabled))
                 if service.notifications.authorizationStatus == .denied {
                     HStack {
@@ -23,10 +17,11 @@ struct SettingsView: View {
                         Button("打开系统设置") { service.openNotificationSettings() }
                     }
                 }
-                Toggle("未确认重复提醒", isOn: settingBinding(\.repeatRemindersEnabled))
+                Toggle("未确认时重复提醒", isOn: settingBinding(\.repeatRemindersEnabled))
                 Picker("重复提醒间隔", selection: settingBinding(\.repeatIntervalMinutes)) {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { Text("\($0) 分钟").tag($0) }
                 }
+                .disabled(!storage.settings.repeatRemindersEnabled)
                 Toggle("晚间检查", isOn: settingBinding(\.eveningCheckEnabled))
                 DatePicker("晚间检查时间", selection: eveningCheckBinding, displayedComponents: .hourAndMinute)
                     .disabled(!storage.settings.eveningCheckEnabled)
@@ -41,14 +36,22 @@ struct SettingsView: View {
                 }
             }
 
-            Section {
-                Text("MediCheck 只记录用户确认，不提供剂量、补服或其他医疗建议。")
+            Section("数据与隐私") {
+                Label("药品、计划和记录只保存在这台 Mac", systemImage: "lock.fill")
+                Text("MediCheck 不联网、无账号、无广告。删除应用前如需保留数据，请先等待后续版本提供导出功能。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("关于") {
+                LabeledContent("版本", value: "2.0")
+                Text("MediCheck 只执行用户录入的提醒和记录，不提供诊断、剂量、相互作用、漏服补服或其他医疗建议。用药方案请以医生或药师意见为准。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 520)
+        .frame(width: 480, height: 570)
         .padding(.top, 8)
         .onAppear {
             service.notifications.refreshAuthorizationStatus()
@@ -56,24 +59,11 @@ struct SettingsView: View {
         }
     }
 
-    private func timeBinding(for dose: DoseType) -> Binding<Date> {
-        Binding(
-            get: { DateSupport.time(on: .now, minutes: storage.settings.minutes(for: dose)) },
-            set: { date in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                let minutes = (components.hour ?? 0) * 60 + (components.minute ?? 0)
-                storage.updateSettings { $0.doseMinutes[dose] = minutes }
-                service.settingsDidChange(scheduleChanged: true)
-            }
-        )
-    }
-
     private var eveningCheckBinding: Binding<Date> {
         Binding(
             get: { DateSupport.time(on: .now, minutes: storage.settings.eveningCheckMinutes) },
             set: { date in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                storage.updateSettings { $0.eveningCheckMinutes = (components.hour ?? 0) * 60 + (components.minute ?? 0) }
+                storage.updateSettings { $0.eveningCheckMinutes = DateSupport.minutesSinceMidnight(for: date) }
                 service.settingsDidChange()
             }
         )
@@ -99,4 +89,3 @@ struct SettingsView: View {
         )
     }
 }
-

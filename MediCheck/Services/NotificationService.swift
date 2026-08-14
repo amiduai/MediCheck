@@ -29,50 +29,67 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         }
     }
 
-    func scheduleDoseNotifications(for record: DailyRecord, enabled: Bool) {
-        let identifiers = DoseType.allCases.map { notificationID(for: $0, dayKey: record.id) }
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    func scheduleDoseNotifications(for occurrences: [DoseOccurrence], enabled: Bool) {
+        center.removeAllPendingNotificationRequests()
         guard enabled else { return }
 
-        for dose in DoseType.allCases {
-            guard let entry = record.entries[dose], entry.confirmedTime == nil, entry.scheduledTime > .now else { continue }
+        for occurrence in occurrences.prefix(48) {
             let content = UNMutableNotificationContent()
-            content.title = "💊 \(dose.displayName)提醒"
-            content.body = "今天的\(dose.displayName)还没有确认。"
+            content.title = "💊 \(occurrence.medication.name)"
+            content.body = notificationBody(for: occurrence)
             content.sound = .default
-            content.userInfo = ["dose": dose.rawValue]
+            content.userInfo = ["occurrenceID": occurrence.id]
 
-            var components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: entry.scheduledTime)
+            var components = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute],
+                from: occurrence.scheduledTime
+            )
             components.timeZone = .current
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-            let request = UNNotificationRequest(identifier: notificationID(for: dose, dayKey: record.id), content: content, trigger: trigger)
-            center.add(request)
+            center.add(UNNotificationRequest(
+                identifier: notificationID(for: occurrence.id),
+                content: content,
+                trigger: trigger
+            ))
         }
     }
 
-    func sendDoseReminder(_ dose: DoseType) {
+    func sendDoseReminder(_ occurrence: DoseOccurrence) {
         let content = UNMutableNotificationContent()
-        content.title = "💊 \(dose.displayName)提醒"
-        content.body = "今天的\(dose.displayName)还没有确认。"
+        content.title = "💊 \(occurrence.medication.name)尚未确认"
+        content.body = notificationBody(for: occurrence)
         content.sound = .default
-        content.userInfo = ["dose": dose.rawValue]
-        center.add(UNNotificationRequest(identifier: "immediate.\(UUID().uuidString)", content: content, trigger: nil))
+        content.userInfo = ["occurrenceID": occurrence.id]
+        center.add(UNNotificationRequest(
+            identifier: "immediate.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        ))
     }
 
-    func sendEveningComplete() {
+    func sendDailyComplete(completed: Int) {
         let content = UNMutableNotificationContent()
-        content.title = "✅ 今天的服药记录已全部完成"
-        content.body = "早、中、晚三次均已确认。"
+        content.title = "✅ 今天的计划用药已完成"
+        content.body = "已确认 \(completed) 次计划用药。"
         content.sound = .default
-        center.add(UNNotificationRequest(identifier: "evening.complete.\(UUID().uuidString)", content: content, trigger: nil))
+        center.add(UNNotificationRequest(
+            identifier: "daily.complete.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        ))
     }
 
-    func removeDoseNotification(_ dose: DoseType, dayKey: String) {
-        center.removePendingNotificationRequests(withIdentifiers: [notificationID(for: dose, dayKey: dayKey)])
+    func removeDoseNotification(occurrenceID: String) {
+        center.removePendingNotificationRequests(withIdentifiers: [notificationID(for: occurrenceID)])
     }
 
-    private func notificationID(for dose: DoseType, dayKey: String) -> String {
-        "dose.\(dayKey).\(dose.rawValue)"
+    private func notificationBody(for occurrence: DoseOccurrence) -> String {
+        let detail = occurrence.medication.detailLine
+        return detail.isEmpty ? "请按计划确认本次用药。" : detail
+    }
+
+    private func notificationID(for occurrenceID: String) -> String {
+        "medicheck.dose.\(occurrenceID)"
     }
 
     nonisolated func userNotificationCenter(
@@ -88,11 +105,10 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let dose = response.notification.request.content.userInfo["dose"] as? String
+        let occurrenceID = response.notification.request.content.userInfo["occurrenceID"] as? String
         Task { @MainActor [weak self] in
-            self?.onNotificationOpened?(dose ?? "")
+            self?.onNotificationOpened?(occurrenceID ?? "")
         }
         completionHandler()
     }
 }
-

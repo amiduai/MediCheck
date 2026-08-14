@@ -11,6 +11,15 @@ enum DateSupport {
         return calendar.date(byAdding: .minute, value: minutes, to: start) ?? start
     }
 
+    static func minutesSinceMidnight(for date: Date, calendar: Calendar = .current) -> Int {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        return (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    }
+
+    static func occurrenceID(planID: UUID, day: Date, minutes: Int, calendar: Calendar = .current) -> String {
+        "\(planID.uuidString).\(dayKey(for: day, calendar: calendar)).minute\(minutes)"
+    }
+
     static func status(entry: DoseEntry, now: Date) -> DoseStatus {
         if let confirmed = entry.confirmedTime {
             return .done(confirmed)
@@ -18,4 +27,3 @@ enum DateSupport {
         return now >= entry.scheduledTime ? .overdue : .pending(entry.scheduledTime)
     }
 }
-

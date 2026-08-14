@@ -2,9 +2,9 @@ import AppKit
 import Foundation
 
 enum ReminderContent: Equatable {
-    case dose(DoseType)
+    case occurrence(String)
     case dailyStatus
-    case eveningReview
+    case dailyReview
 }
 
 @MainActor
@@ -21,7 +21,7 @@ final class ReminderService: ObservableObject {
     private var currentDayKey = ""
     private var lastReminderAt: [String: Date] = [:]
     private var manualSnoozeUntil: [String: Date] = [:]
-    private var eveningCheckedDay: String?
+    private var dailyReviewedDay: String?
     private lazy var reminderWindow = ReminderWindowController(service: self)
 
     init(
@@ -34,18 +34,22 @@ final class ReminderService: ObservableObject {
         self.loginItem = loginItem
     }
 
+    var presentedOccurrence: DoseOccurrence? {
+        guard case .occurrence(let id) = presentedContent else { return nil }
+        return storage.occurrence(id: id, near: now)
+    }
+
     func start() {
         guard !started else { return }
         started = true
         currentDayKey = DateSupport.dayKey(for: .now)
-        storage.ensureRecord()
         notifications.configure()
-        notifications.onNotificationOpened = { [weak self] rawDose in
+        notifications.onNotificationOpened = { [weak self] occurrenceID in
             guard let self else { return }
-            if let dose = DoseType(rawValue: rawDose) {
-                self.showDose(dose)
+            if !occurrenceID.isEmpty {
+                self.showOccurrence(id: occurrenceID)
             } else {
-                self.reconcile(force: true)
+                _ = self.reconcile(force: true)
             }
         }
         notifications.requestAuthorizationIfNeeded()
@@ -68,28 +72,47 @@ final class ReminderService: ObservableObject {
         RunLoop.main.add(timer!, forMode: .common)
     }
 
-    func status(for dose: DoseType) -> DoseStatus {
-        storage.status(for: dose, at: now)
+    func status(for occurrence: DoseOccurrence) -> DoseOccurrenceStatus {
+        occurrence.status(at: now)
     }
 
-    func confirm(_ dose: DoseType) {
-        let dayKey = DateSupport.dayKey(for: now)
-        storage.confirm(dose, at: now)
-        notifications.removeDoseNotification(dose, dayKey: dayKey)
-        lastReminderAt.removeValue(forKey: reminderKey(dose))
-        manualSnoozeUntil.removeValue(forKey: reminderKey(dose))
+    func confirm(occurrenceID: String) {
+        guard let occurrence = storage.occurrence(id: occurrenceID, near: now) else { return }
+        storage.confirm(occurrence, at: now)
+        notifications.removeDoseNotification(occurrenceID: occurrence.id)
+        clearReminderState(for: occurrence.id)
         reminderWindow.close()
+        scheduleNotifications()
         _ = reconcile(force: true)
     }
 
-    func snooze(_ dose: DoseType) {
-        let key = reminderKey(dose)
-        manualSnoozeUntil[key] = Calendar.current.date(
+    func skip(occurrenceID: String) {
+        guard let occurrence = storage.occurrence(id: occurrenceID, near: now) else { return }
+        storage.skip(occurrence, at: now)
+        notifications.removeDoseNotification(occurrenceID: occurrence.id)
+        clearReminderState(for: occurrence.id)
+        reminderWindow.close()
+        scheduleNotifications()
+        _ = reconcile(force: true)
+    }
+
+    func undoRecord(occurrenceID: String) {
+        storage.removeRecord(id: occurrenceID)
+        scheduleNotifications()
+        _ = reconcile(force: false)
+    }
+
+    func recordAsNeeded(planID: UUID) {
+        _ = storage.recordAsNeeded(planID: planID, at: now)
+    }
+
+    func snooze(occurrenceID: String) {
+        manualSnoozeUntil[occurrenceID] = Calendar.current.date(
             byAdding: .minute,
             value: storage.settings.repeatIntervalMinutes,
             to: now
         )
-        lastReminderAt[key] = now
+        lastReminderAt[occurrenceID] = now
         reminderWindow.close()
     }
 
@@ -97,19 +120,26 @@ final class ReminderService: ObservableObject {
         reminderWindow.close()
     }
 
-    func showDose(_ dose: DoseType) {
-        guard case .done = storage.status(for: dose, at: now) else {
-            presentedContent = .dose(dose)
+    func showOccurrence(id: String) {
+        guard let occurrence = storage.occurrence(id: id, near: now) else { return }
+        switch occurrence.status(at: now) {
+        case .taken, .skipped: return
+        case .pending, .overdue:
+            presentedContent = .occurrence(id)
             reminderWindow.show()
-            return
         }
     }
 
-    func settingsDidChange(scheduleChanged: Bool = false) {
+    func dataDidChange() {
         now = .now
-        if scheduleChanged { storage.refreshTodaySchedule(at: now) }
         scheduleNotifications()
-        _ = reconcile(force: scheduleChanged)
+        _ = reconcile(force: true)
+    }
+
+    func settingsDidChange() {
+        now = .now
+        scheduleNotifications()
+        _ = reconcile(force: false)
     }
 
     func openNotificationSettings() {
@@ -125,12 +155,11 @@ final class ReminderService: ObservableObject {
             currentDayKey = newDayKey
             lastReminderAt.removeAll()
             manualSnoozeUntil.removeAll()
-            eveningCheckedDay = nil
-            storage.ensureRecord(for: now)
+            dailyReviewedDay = nil
             scheduleNotifications()
         }
-        let showedEveningReview = performEveningCheckIfNeeded()
-        if !showedEveningReview {
+        let showedDailyReview = performDailyReviewIfNeeded()
+        if !showedDailyReview {
             _ = reconcile(force: false)
         }
     }
@@ -138,13 +167,8 @@ final class ReminderService: ObservableObject {
     @discardableResult
     private func reconcile(force: Bool) -> Bool {
         now = .now
-        let overdue = DoseType.allCases.filter {
-            if case .overdue = storage.status(for: $0, at: now) { return true }
-            return false
-        }
-        guard let earliest = overdue.first else { return false }
-
-        let key = reminderKey(earliest)
+        guard let earliest = storage.overdueOccurrences(at: now).first else { return false }
+        let key = earliest.id
         if let snooze = manualSnoozeUntil[key], now < snooze { return false }
 
         let shouldRepeat: Bool
@@ -163,38 +187,46 @@ final class ReminderService: ObservableObject {
         guard shouldRepeat else { return false }
         lastReminderAt[key] = now
         manualSnoozeUntil.removeValue(forKey: key)
-        showDose(earliest)
+        showOccurrence(id: key)
         if storage.settings.notificationsEnabled,
-           now.timeIntervalSince(storage.record(for: now).entries[earliest]?.scheduledTime ?? now) > 60 {
+           now.timeIntervalSince(earliest.scheduledTime) > 60 {
             notifications.sendDoseReminder(earliest)
         }
         return true
     }
 
-    private func performEveningCheckIfNeeded() -> Bool {
+    private func performDailyReviewIfNeeded() -> Bool {
         guard storage.settings.eveningCheckEnabled else { return false }
         let key = DateSupport.dayKey(for: now)
-        guard eveningCheckedDay != key else { return false }
+        guard dailyReviewedDay != key else { return false }
         let checkTime = DateSupport.time(on: now, minutes: storage.settings.eveningCheckMinutes)
         guard now >= checkTime else { return false }
-        eveningCheckedDay = key
-        let record = storage.record(for: now)
-        if record.completedCount == DoseType.allCases.count {
-            if storage.settings.notificationsEnabled { notifications.sendEveningComplete() }
+        dailyReviewedDay = key
+
+        let summary = storage.summary(for: now)
+        guard summary.scheduledCount > 0 else { return false }
+        if summary.resolvedCount == summary.scheduledCount {
+            if summary.completedCount == summary.scheduledCount,
+               storage.settings.notificationsEnabled {
+                notifications.sendDailyComplete(completed: summary.completedCount)
+            }
             return false
-        } else {
-            presentedContent = .eveningReview
-            reminderWindow.show()
-            return true
         }
+        presentedContent = .dailyReview
+        reminderWindow.show()
+        return true
     }
 
     private func scheduleNotifications() {
-        notifications.scheduleDoseNotifications(for: storage.record(for: now), enabled: storage.settings.notificationsEnabled)
+        notifications.scheduleDoseNotifications(
+            for: storage.upcomingOccurrences(from: now, days: 7),
+            enabled: storage.settings.notificationsEnabled
+        )
     }
 
-    private func reminderKey(_ dose: DoseType) -> String {
-        "\(DateSupport.dayKey(for: now)).\(dose.rawValue)"
+    private func clearReminderState(for occurrenceID: String) {
+        lastReminderAt.removeValue(forKey: occurrenceID)
+        manualSnoozeUntil.removeValue(forKey: occurrenceID)
     }
 
     private func observeSystemEvents() {
@@ -238,7 +270,6 @@ final class ReminderService: ObservableObject {
     @objc private func systemTimeChanged() {
         now = .now
         currentDayKey = DateSupport.dayKey(for: now)
-        storage.refreshTodaySchedule(at: now)
         scheduleNotifications()
         _ = reconcile(force: true)
     }

@@ -28,6 +28,8 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
     entitlements:
       path: MediCheck/MediCheck.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
   MediCheckTests:
     type: bundle.unit-test
     platform: macOS

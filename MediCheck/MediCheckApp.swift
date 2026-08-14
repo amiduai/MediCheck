@@ -29,7 +29,12 @@ struct MediCheckApp: App {
         Window("服药记录", id: "history") {
             HistoryView(storage: storage)
         }
-        .defaultSize(width: 460, height: 600)
+        .defaultSize(width: 560, height: 680)
+
+        Window("用药计划", id: "medication-plans") {
+            MedicationPlansView(service: service, storage: storage)
+        }
+        .defaultSize(width: 700, height: 620)
 
         Settings {
             SettingsView(service: service, storage: storage)
